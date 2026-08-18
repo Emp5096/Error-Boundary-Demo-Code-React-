@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>MyBatis × SXSSF 导出故障实验室</title>
+    <link rel="stylesheet" href="/export-lab.css">
+</head>
+<body>
+<a class="skip-link" href="#main">跳到主要内容</a>
+<header class="topbar">
+    <div class="brand">
+        <span class="brand-mark" aria-hidden="true">JVM</span>
+        <div>
+            <strong>Export Loop Lab</strong>
+            <span>MySQL · MyBatis · SXSSFWorkbook</span>
+        </div>
+    </div>
+    <div class="topbar-actions">
+        <a href="/" class="text-link">原 JVM 实验页</a>
+        <span id="service-status" class="health pending"><span class="health-dot"></span>正在连接</span>
+    </div>
+</header>
+
+<main id="main" class="shell">
+    <section class="hero" aria-labelledby="page-title">
+        <div>
+            <p class="eyebrow">可复现 · 可停止 · 可留证</p>
+            <h1 id="page-title">重放报表导出的循环退出缺陷</h1>
+            <p class="hero-copy">对照正确实现与“遗漏外层 break”的实现，观察任务是否结束、空查询、外循环、CPU、Heap 和 GC。实验只展示可确认的代码行为，不预设全站假死或 OOM。</p>
+        </div>
+        <div class="pid-panel">
+            <span>当前 JVM PID</span>
+            <strong id="pid">—</strong>
+            <button id="copy-pid" class="button ghost compact" type="button">复制 PID</button>
+        </div>
+    </section>
+
+    <section class="notice danger" role="note">
+        <div class="notice-symbol" aria-hidden="true">!</div>
+        <div>
+            <strong>错误模式会一直运行，直到你手动停止</strong>
+            <p>默认策略使用 MyBatis 主键游标分页和 <code>SXSSFWorkbook(100)</code>。你也可以显式选择“未索引排序 + OFFSET”观察数据库压力；这个策略会扫描并排序大量记录，停止请求必须等当前 SQL 返回。</p>
+        </div>
+    </section>
+
+    <section aria-labelledby="runtime-title">
+        <div class="section-heading">
+            <div><p class="eyebrow">LIVE RUNTIME</p><h2 id="runtime-title">运行现场</h2></div>
+        </div>
+        <div class="metric-grid">
+            <article class="metric"><span>进程 CPU</span><strong id="metric-cpu">—</strong><small>JVM占整机总逻辑CPU；8核时单核跑满约显示12.5%</small></article>
+            <article class="metric"><span>Heap 使用</span><strong id="metric-heap">—</strong><small id="metric-heap-detail">—</small></article>
+            <article class="metric"><span>GC</span><strong id="metric-gc">—</strong><small id="metric-gc-detail">—</small></article>
+            <article class="metric"><span>应用异步执行器</span><strong id="metric-pool">—</strong><small>复用 Spring Boot 已有 applicationTaskExecutor</small></article>
+            <article class="metric"><span>Hikari 连接</span><strong id="metric-hikari">—</strong><small>active / idle，实验上限 8</small></article>
+            <article class="metric"><span>累计导出 SQL</span><strong id="metric-queries">—</strong><small>仅统计任务的分页查询</small></article>
+            <article class="metric"><span>活跃线程</span><strong id="metric-threads">—</strong><small>JVM ThreadMXBean</small></article>
+            <article class="metric"><span>SXSSF 临时目录</span><strong id="metric-temp">—</strong><small id="temp-path">—</small></article>
+            <article class="metric"><span>输出文件</span><strong id="metric-output">—</strong><small id="output-path">—</small></article>
+            <article class="metric"><span>状态接口 RT</span><strong id="metric-status-rt">—</strong><small>浏览器每秒请求 /status 的往返时间</small></article>
+        </div>
+
+        <article class="panel chart-panel">
+            <div class="panel-title-row">
+                <div><h3>最近 180 秒趋势</h3><p>Heap 按 Xmx 归一化；CPU 按 100% 标尺显示。</p></div>
+                <div class="legend" aria-label="图例"><span class="heap-key">Heap</span><span class="cpu-key">CPU</span></div>
+            </div>
+            <svg id="runtime-chart" viewBox="0 0 1000 260" role="img" aria-label="Heap 和 CPU 最近趋势图">
+                <line x1="0" y1="20" x2="1000" y2="20" class="grid-line"></line>
+                <line x1="0" y1="130" x2="1000" y2="130" class="grid-line"></line>
+                <line x1="0" y1="240" x2="1000" y2="240" class="grid-line"></line>
+                <polyline id="heap-line" class="heap-line" points=""></polyline>
+                <polyline id="cpu-line" class="cpu-line" points=""></polyline>
+            </svg>
+            <p id="chart-summary" class="sr-summary">等待采样。</p>
+        </article>
+
+        <article class="panel probe-panel" aria-labelledby="probe-title">
+            <div class="panel-title-row probe-heading">
+                <div>
+                    <p class="eyebrow">CONTROLLED COMPARISON</p>
+                    <h2 id="probe-title">三层 RT 对照采样</h2>
+                    <p>先空闲采样并保存基线，再启动 1～3 个错误任务。三类请求每轮各发送一次，不把单次波动当作结论。</p>
+                </div>
+                <span id="probe-run-state" class="badge neutral">未运行</span>
+            </div>
+
+            <div class="probe-controls">
+                <div class="field"><label for="probe-interval">每轮间隔</label><select id="probe-interval"><option value="250">250 ms</option><option value="500" selected>500 ms</option><option value="1000">1 秒</option></select></div>
+                <div class="field"><label for="probe-last-id">同表起始 ID</label><input id="probe-last-id" type="number" min="0" value="0"><small>查询条件为 id &gt; lastId</small></div>
+                <div class="field"><label for="probe-row-limit">同表返回行数</label><input id="probe-row-limit" type="number" min="1" max="500" value="100"><small>包含 MyBatis 映射和 JSON 返回</small></div>
+                <div class="button-row probe-actions">
+                    <button id="probe-start" class="button secondary" type="button">开始持续采样</button>
+                    <button id="probe-stop" class="button ghost" type="button" disabled>暂停</button>
+                    <button id="probe-baseline" class="button ghost" type="button">保存为基线并清零</button>
+                    <button id="probe-reset" class="button ghost" type="button">清零</button>
+                </div>
+            </div>
+
+            <div class="probe-grid">
+                <article class="probe-card">
+                    <div><span class="probe-index">01</span><h3>纯 JVM / Tomcat</h3></div>
+                    <p><code>GET /probe/jvm</code>，不访问数据库。</p>
+                    <strong id="probe-jvm-current">—</strong>
+                    <dl><div><dt>平均</dt><dd id="probe-jvm-avg">—</dd></div><div><dt>P95</dt><dd id="probe-jvm-p95">—</dd></div><div><dt>P99</dt><dd id="probe-jvm-p99">—</dd></div></dl>
+                    <small id="probe-jvm-meta">成功 0 · 错误 0</small><small id="probe-jvm-baseline">基线：未保存</small>
+                </article>
+                <article class="probe-card">
+                    <div><span class="probe-index">02</span><h3>连接池 / MySQL</h3></div>
+                    <p><code>SELECT 1</code>，不访问业务表。</p>
+                    <strong id="probe-mysql-current">—</strong>
+                    <dl><div><dt>平均</dt><dd id="probe-mysql-avg">—</dd></div><div><dt>P95</dt><dd id="probe-mysql-p95">—</dd></div><div><dt>P99</dt><dd id="probe-mysql-p99">—</dd></div></dl>
+                    <small id="probe-mysql-meta">成功 0 · 错误 0</small><small id="probe-mysql-baseline">基线：未保存</small>
+                </article>
+                <article class="probe-card">
+                    <div><span class="probe-index">03</span><h3>同表业务查询</h3></div>
+                    <p>主键范围读取，包含结果映射和 JSON 序列化。</p>
+                    <strong id="probe-table-current">—</strong>
+                    <dl><div><dt>平均</dt><dd id="probe-table-avg">—</dd></div><div><dt>P95</dt><dd id="probe-table-p95">—</dd></div><div><dt>P99</dt><dd id="probe-table-p99">—</dd></div></dl>
+                    <small id="probe-table-meta">成功 0 · 错误 0</small><small id="probe-table-baseline">基线：未保存</small>
+                </article>
+            </div>
+            <p id="probe-message" class="field-help" aria-live="polite">建议空闲采样至少 30 秒后保存基线，再开启错误任务继续采样。</p>
+        </article>
+    </section>
+
+    <section class="two-column" aria-label="实验控制区">
+        <article class="panel">
+            <div class="panel-title-row">
+                <div><p class="eyebrow">STEP 1</p><h2>准备 MySQL 数据</h2></div>
+                <span id="data-count" class="badge neutral">— 行</span>
+            </div>
+            <p class="panel-copy">初始化脚本只建表，不自动塞大数据。建议先用 10 万行观察；再次执行只补足到目标值，不会清空已有数据。</p>
+            <form id="seed-form" class="inline-form">
+                <label for="seed-rows">目标总行数</label>
+                <input id="seed-rows" type="number" min="1" max="500000" step="10000" value="500000">
+                <button id="seed-button" class="button secondary" type="submit">生成测试数据</button>
+            </form>
+            <p id="seed-help" class="field-help" aria-live="polite">数据越多，首次读到空页越晚；已有数据不会因填写更小目标而删除。</p>
+        </article>
+
+        <article class="panel">
+            <div><p class="eyebrow">STEP 2</p><h2>提交导出任务</h2></div>
+            <form id="task-form" class="form-grid">
+                <div class="field full">
+                    <label for="mode">代码模式</label>
+                    <select id="mode">
+                        <option value="BUGGY_MISSING_BREAK">错误：遗漏外层退出</option>
+                        <option value="FIXED">正确：数据结束后退出</option>
+                    </select>
+                    <small id="mode-help">数据结束后仍反复创建并关闭空 Workbook、执行末页查询；查询成本由下方策略决定。</small>
+                </div>
+                <div class="field full">
+                    <label for="query-strategy">分页查询策略</label>
+                    <select id="query-strategy">
+                        <option value="INDEXED_CURSOR">正常：主键索引游标（id &gt; lastId）</option>
+                        <option value="UNINDEXED_DEEP_OFFSET">重SQL：未索引 customer_name 排序 + 深 OFFSET</option>
+                    </select>
+                    <small id="query-help">使用主键范围和 LIMIT，越往后查询成本基本稳定；数据结束后的空查询很轻。</small>
+                </div>
+                <div class="field"><label for="page-size">分页大小</label><input id="page-size" type="number" min="10" max="5000" value="1000"><small>MyBatis 每次读取行数</small></div>
+                <div class="field"><label for="file-limit">每文件数据行</label><input id="file-limit" type="number" min="1000" max="500000" step="1000" value="50000"><small>达到上限后新建普通 SXSSFWorkbook</small></div>
+                <div class="field"><label for="duration">保护时长（秒，0=关闭）</label><input id="duration" type="number" min="0" max="600" value="0"><small>当前关闭自动停止；手动停止也要等正在执行的 SQL 返回</small></div>
+                <div class="field"><label for="duplicate-count">提交次数（1～3）</label><input id="duplicate-count" type="number" min="1" max="3" value="1"><small>默认一次；可模拟少量重复点击，每次都是独立任务</small></div>
+                <div class="field checkbox-field"><label><input id="save-files" type="checkbox" checked> 保存真实 xlsx 文件</label><small>关闭后仍写 SXSSF 临时文件，但不落最终文件</small></div>
+                <details class="advanced full">
+                    <summary>额外 OOM 注入（独立实验，危险）</summary>
+                    <div class="advanced-grid">
+                        <div class="field"><label for="oom-kb">每次空外循环保留 KB</label><input id="oom-kb" type="number" min="0" max="1024" value="0"><small>0 表示完全关闭</small></div>
+                        <div class="field"><label for="oom-confirm">开启确认词</label><input id="oom-confirm" type="text" autocomplete="off" placeholder="ENABLE_OOM"><small>只有注入值大于 0 才需要</small></div>
+                    </div>
+                </details>
+                <button id="start-button" class="button primary full" type="submit">启动导出实验</button>
+            </form>
+            <p id="task-message" class="field-help" aria-live="polite"></p>
+        </article>
+    </section>
+
+    <section class="panel" aria-labelledby="tasks-title">
+        <div class="panel-title-row"><div><p class="eyebrow">ACTIVE & HISTORY</p><h2 id="tasks-title">导出任务</h2></div><span id="task-count" class="badge neutral">0 个任务</span></div>
+        <div class="table-wrap">
+            <table>
+                <thead><tr><th>状态</th><th>模式 / 阶段</th><th>行 / 文件</th><th>SQL / 空查询</th><th>外循环</th><th>耗时</th><th>操作</th></tr></thead>
+                <tbody id="task-table"><tr><td colspan="7" class="empty">暂无任务</td></tr></tbody>
+            </table>
+        </div>
+    </section>
+
+    <section class="two-column diagnostics" aria-label="诊断与留证">
+        <article class="panel">
+            <div><p class="eyebrow">STEP 3</p><h2>服务存活时采集</h2></div>
+            <div class="button-row">
+                <button id="thread-dump-button" class="button secondary" type="button">保存线程快照</button>
+                <button id="copy-linux" class="button ghost" type="button">复制 Linux 命令</button>
+            </div>
+            <pre id="evidence-preview" tabindex="0">点击“保存线程快照”，或在 Linux 上使用 jcmd / jstack。</pre>
+        </article>
+        <article class="panel">
+            <div><p class="eyebrow">STEP 4</p><h2>服务停止后分析</h2></div>
+            <ul class="evidence-list">
+                <li><strong>应用日志</strong><span>runtime/logs/application.log：任务、文件、空查询倍增节点、最终状态</span></li>
+                <li><strong>GC 日志</strong><span>runtime/gc/gc.log*：分配、Young/Full GC、停顿和退出前趋势</span></li>
+                <li><strong>Heap dump</strong><span>runtime/dump/*.hprof：只有真正 OOME 才由 HeapDumpOnOutOfMemoryError 生成</span></li>
+                <li><strong>线程快照</strong><span>runtime/evidence/*.txt：必须在进程仍存活时主动保存</span></li>
+            </ul>
+            <a class="button ghost full-width" href="/EXPORT-LAB-GUIDE.md" target="_blank" rel="noreferrer">打开完整命令手册</a>
+        </article>
+    </section>
+</main>
+
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+<script src="/export-lab.js"></script>
+</body>
+</html>

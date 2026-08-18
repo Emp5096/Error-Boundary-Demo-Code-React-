@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="在隔离子 JVM 中练习 CPU、堆、GC 与线程池故障的标准诊断流程。">
+    <title>JVM Incident Lab · Spring Boot</title>
+    <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<a class="skip-link" href="#main-content">跳到主要内容</a>
+
+<header class="topbar">
+    <a class="brand" href="/" aria-label="JVM Incident Lab 首页">
+        <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M4 18V8m5 10V4m6 14v-7m5 7V6M3 21h18"/></svg>
+        </span>
+        <span>JVM<span class="brand-slash">//</span>INCIDENT LAB</span>
+    </a>
+    <div id="service-health" class="service-health" aria-live="polite">
+        <span class="health-dot" aria-hidden="true"></span>
+        <span>Spring Boot 在线</span>
+    </div>
+</header>
+
+<main id="main-content" class="page-shell">
+    <section class="hero" aria-labelledby="page-title">
+        <div class="eyebrow"><span>INCIDENT RESPONSE PRACTICE</span><span>JAVA 17 · SPRING BOOT 3</span></div>
+        <h1 id="page-title">网页变卡不是结论。<br><span>先把证据留下来。</span></h1>
+        <p>启动一个隔离的故障子 JVM，观察 RT、CPU、堆、GC 和线程池变化，按真实线上顺序采集证据，再提交你的根因判断。</p>
+    </section>
+
+    <ol class="response-flow" aria-label="故障处理五阶段">
+        <li class="is-current"><span>01</span><strong>确认现象</strong><small>时间点与影响面</small></li>
+        <li><span>02</span><strong>保护现场</strong><small>重启前先采证</small></li>
+        <li><span>03</span><strong>建立假设</strong><small>CPU / 堆 / GC / 线程</small></li>
+        <li><span>04</span><strong>止损恢复</strong><small>限流、取消、隔离</small></li>
+        <li><span>05</span><strong>根因修复</strong><small>代码与防护</small></li>
+    </ol>
+
+    <aside class="safety-note" aria-label="实验安全说明">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 3.7 18a2 2 0 0 0 1.8 3h13a2 2 0 0 0 1.8-3L12 3Zm0 5v5m0 4h.01"/></svg>
+        <div>
+            <strong>所有故障发生在受限子 JVM 中</strong>
+            <p>停止实验相当于“先重启”：网页仍在线，但线程快照、堆概览和 JVM 参数将无法补采。请在共享生产环境之外使用。</p>
+        </div>
+    </aside>
+
+    <section class="setup-grid" aria-label="实验设置与现场背景">
+        <article class="panel setup-panel">
+            <div class="panel-heading">
+                <div><span class="section-index">01 / CREATE INCIDENT</span><h2>创建故障现场</h2></div>
+                <span class="safe-chip">子进程隔离</span>
+            </div>
+
+            <div class="field-group">
+                <label for="scenario">练习模式</label>
+                <select id="scenario">
+                    <option value="RANDOM" selected>盲测：随机根因（推荐）</option>
+                    <option value="HEAP_OOM">引导：堆持续增长 / OOM</option>
+                    <option value="CPU_HIGH">引导：CPU 计算热点</option>
+                    <option value="GC_THRASH">引导：短命对象 / GC 频繁</option>
+                    <option value="THREAD_POOL">引导：业务线程池耗尽</option>
+                </select>
+                <p id="scenario-help" class="field-help">系统会随机选择一种根因，提交判断前不会揭晓答案。</p>
+            </div>
+
+            <div class="field-row">
+                <div class="field-group compact">
+                    <label for="duration">现场保留时间</label>
+                    <select id="duration">
+                        <option value="30">30 秒</option>
+                        <option value="40" selected>40 秒</option>
+                        <option value="60">60 秒</option>
+                    </select>
+                </div>
+                <div class="field-group compact">
+                    <label for="intensity">负载强度</label>
+                    <select id="intensity">
+                        <option value="1" selected>1 · 温和</option>
+                        <option value="2">2 · 明显</option>
+                        <option value="3">3 · 较高</option>
+                    </select>
+                </div>
+            </div>
+
+            <details class="advanced-options">
+                <summary>高级实验参数</summary>
+                <div class="field-row advanced-grid">
+                    <div class="field-group compact">
+                        <label for="heap-size">子 JVM 最大堆</label>
+                        <select id="heap-size">
+                            <option value="48">48 MB</option>
+                            <option value="64" selected>64 MB</option>
+                            <option value="96">96 MB</option>
+                            <option value="128">128 MB</option>
+                        </select>
+                    </div>
+                    <div class="field-group compact">
+                        <label for="chunk-size">分配块大小</label>
+                        <select id="chunk-size">
+                            <option value="256">256 KB</option>
+                            <option value="512" selected>512 KB</option>
+                            <option value="1024">1 MB</option>
+                        </select>
+                    </div>
+                </div>
+            </details>
+
+            <div class="action-stack">
+                <button id="start-button" class="button button-primary" type="button">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 7 8 5-8 5V7Z"/></svg>
+                    启动故障现场
+                </button>
+                <button id="stop-button" class="button button-danger-ghost" type="button" disabled>
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7h10v10H7z"/></svg>
+                    模拟重启 / 丢失现场
+                </button>
+            </div>
+            <p id="form-message" class="form-message" role="alert"></p>
+        </article>
+
+        <article class="panel context-panel">
+            <div class="panel-heading">
+                <div><span class="section-index">INCIDENT BRIEF</span><h2>你现在只知道这些</h2></div>
+            </div>
+            <blockquote>“点击一个接口后 RT 开始飙升，其他接口也变慢了。应用是单体服务，为了不耽误测试，目前还没有重启。”</blockquote>
+            <div class="known-facts">
+                <div><span>部署形态</span><strong>单 JVM / 无负载均衡</strong></div>
+                <div><span>直接证据</span><strong>暂无 OOM 日志</strong></div>
+                <div><span>当前目标</span><strong>先分类，再处置</strong></div>
+            </div>
+            <button id="probe-button" class="button button-secondary" type="button" disabled>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h4l2-6 4 12 2-6h4"/></svg>
+                调用一次业务探测接口
+            </button>
+            <div id="probe-result" class="probe-result" aria-live="polite">启动实验后，可亲自感受一次 RT。</div>
+        </article>
+    </section>
+
+    <section class="panel monitor-panel" aria-labelledby="monitor-title">
+        <div class="panel-heading monitor-heading">
+            <div><span class="section-index">02 / OBSERVE</span><h2 id="monitor-title">实时现象，不自动给结论</h2></div>
+            <div id="status-badge" class="status-badge idle" aria-live="polite"><span aria-hidden="true"></span><strong>待机</strong></div>
+        </div>
+
+        <div class="metric-grid" aria-label="实时 JVM 与业务指标">
+            <div id="metric-rt" class="metric"><span>业务探测 RT</span><strong id="probe-rt">—</strong><small>子 JVM 实测</small></div>
+            <div id="metric-cpu" class="metric"><span>进程 CPU</span><strong id="cpu-percent">—</strong><small>单核口径</small></div>
+            <div id="metric-heap" class="metric"><span>堆使用率</span><strong id="heap-percent">—</strong><small id="heap-detail">0 / 0 MB</small></div>
+            <div id="metric-gc" class="metric"><span>累计 GC</span><strong id="gc-count">—</strong><small id="gc-time">0 ms</small></div>
+            <div id="metric-threads" class="metric"><span>存活线程</span><strong id="live-threads">—</strong><small>当前进程</small></div>
+            <div id="metric-pool" class="metric"><span>业务线程池</span><strong id="pool-state">—</strong><small>active / 4 · queue</small></div>
+        </div>
+
+        <div class="chart-wrap">
+            <div class="chart-head">
+                <div><strong>资源趋势</strong><span>百分比 / 时间</span></div>
+                <div class="chart-legend" aria-label="图例"><span class="legend-heap">堆使用率</span><span class="legend-cpu">CPU（上限显示 200%）</span></div>
+            </div>
+            <svg class="resource-chart" viewBox="0 0 900 260" preserveAspectRatio="none" role="img" aria-labelledby="chart-title chart-desc">
+                <title id="chart-title">堆使用率和 CPU 随时间变化</title>
+                <desc id="chart-desc">折线图仅辅助观察，下方最近采样提供相同的文本数据。</desc>
+                <line x1="0" y1="20" x2="900" y2="20"/><line x1="0" y1="80" x2="900" y2="80"/>
+                <line x1="0" y1="140" x2="900" y2="140"/><line x1="0" y1="200" x2="900" y2="200"/>
+                <polyline id="heap-line" class="line-heap" points="0,240"/>
+                <polyline id="cpu-line" class="line-cpu" points="0,240"/>
+            </svg>
+            <div class="chart-axis"><span>0 秒</span><span id="chart-time">0.0 秒</span></div>
+            <p id="sample-summary" class="sample-summary">尚无采样数据。</p>
+        </div>
+    </section>
+
+    <section class="diagnosis-layout" aria-label="证据采集与根因判断">
+        <article class="panel evidence-panel">
+            <div class="panel-heading">
+                <div><span class="section-index">03 / COLLECT EVIDENCE</span><h2>主动采集现场证据</h2></div>
+                <span id="evidence-progress" class="progress-chip">0 / 6</span>
+            </div>
+            <p class="section-intro">建议先看进程概览和 GC，再按假设选择线程栈或堆信息。线程快照应连续采集多次；本实验显示其中一次真实输出。</p>
+
+            <div class="tool-grid">
+                <button class="tool-button" type="button" data-evidence="PROCESS"><span>01</span><strong>进程概览</strong><small>top / PID 指标</small></button>
+                <button class="tool-button" type="button" data-evidence="GC"><span>02</span><strong>GC 采样</strong><small>jstat 思路</small></button>
+                <button class="tool-button" type="button" data-evidence="THREAD_DUMP"><span>03</span><strong>线程快照</strong><small>真实 jcmd</small></button>
+                <button class="tool-button" type="button" data-evidence="HEAP"><span>04</span><strong>堆概览</strong><small>GC.heap_info</small></button>
+                <button class="tool-button" type="button" data-evidence="JVM_FLAGS"><span>05</span><strong>JVM 参数</strong><small>VM.flags</small></button>
+                <button class="tool-button" type="button" data-evidence="APP_LOG"><span>06</span><strong>应用日志</strong><small>时间窗检索</small></button>
+            </div>
+
+            <div class="evidence-console">
+                <div class="console-header">
+                    <div><span class="console-lights" aria-hidden="true"><i></i><i></i><i></i></span><strong id="evidence-title">evidence://waiting</strong></div>
+                    <span id="evidence-availability" class="availability">等待采集</span>
+                </div>
+                <div class="console-meta">
+                    <code id="evidence-command">请选择上方工具</code>
+                    <p id="evidence-summary">先形成假设，再找能够证伪或证实它的证据。</p>
+                </div>
+                <pre id="evidence-content" tabindex="0"><code>现场证据将显示在这里。</code></pre>
+                <p id="evidence-caution" class="evidence-caution" hidden></p>
+            </div>
+        </article>
+
+        <article class="panel hypothesis-panel">
+            <div class="panel-heading">
+                <div><span class="section-index">04 / DIAGNOSE</span><h2>提交根因判断</h2></div>
+            </div>
+            <p class="section-intro">不要把“RT 高”直接等同于 OOM。选择最能解释全部证据的根因。</p>
+
+            <fieldset id="diagnosis-options" class="diagnosis-options" disabled>
+                <legend class="sr-only">根因假设</legend>
+                <label><input type="radio" name="cause" value="HEAP_OOM"><span><strong>堆对象持续保留</strong><small>最终可能 Java heap space</small></span></label>
+                <label><input type="radio" name="cause" value="CPU_HIGH"><span><strong>CPU 计算热点 / 死循环</strong><small>RUNNABLE 线程持续占核</small></span></label>
+                <label><input type="radio" name="cause" value="GC_THRASH"><span><strong>短命对象分配过快</strong><small>GC 频繁但存活堆不一定增长</small></span></label>
+                <label><input type="radio" name="cause" value="THREAD_POOL"><span><strong>业务线程池耗尽</strong><small>active 满、队列积压、请求超时</small></span></label>
+            </fieldset>
+            <button id="diagnose-button" class="button button-primary" type="button" disabled>提交判断并查看处置方案</button>
+            <p id="diagnosis-help" class="field-help">启动实验并至少采集两项证据后提交。</p>
+
+            <div id="diagnosis-result" class="diagnosis-result" hidden aria-live="polite">
+                <span id="result-kicker" class="result-kicker"></span>
+                <h3 id="result-title"></h3>
+                <p id="result-reasoning"></p>
+                <div class="result-columns">
+                    <div><strong>决定性证据</strong><ul id="result-evidence"></ul></div>
+                    <div><strong>立即止损</strong><ul id="result-actions"></ul></div>
+                    <div><strong>长期修复</strong><ul id="result-fixes"></ul></div>
+                </div>
+            </div>
+        </article>
+    </section>
+
+    <section class="playbook" aria-labelledby="playbook-title">
+        <div class="playbook-heading"><span class="section-index">FIELD PLAYBOOK</span><h2 id="playbook-title">真实现场建议这样处理</h2></div>
+        <div class="playbook-grid">
+            <article><span>1</span><h3>先限定问题</h3><p>记下发生时间、接口、是否全局变慢、能否稳定复现。RT 高只是入口现象。</p><code>access log + application log</code></article>
+            <article><span>2</span><h3>进程活着先采证</h3><p>先看 CPU、内存、线程和 GC，再决定抓线程栈还是 heap dump。不要一上来就重启。</p><code>top · jstat · jstack · jcmd</code></article>
+            <article><span>3</span><h3>证据够了再止损</h3><p>限流、取消异常任务、隔离入口；必须重启时，先确认关键现场已保存。</p><code>limit · cancel · isolate</code></article>
+            <article><span>4</span><h3>修根因和防复发</h3><p>修代码边界、资源池和超时，同时补齐 GC 日志、OOM dump、容量与告警。</p><code>fix · guardrail · observe</code></article>
+        </div>
+    </section>
+</main>
+
+<footer><span>JVM INCIDENT LAB</span><span>隔离实验 · 请勿用于共享生产环境</span></footer>
+
+<dialog id="confirm-dialog" aria-labelledby="dialog-title">
+    <form method="dialog">
+        <div class="dialog-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3 3.7 18a2 2 0 0 0 1.8 3h13a2 2 0 0 0 1.8-3L12 3Zm0 5v5m0 4h.01"/></svg></div>
+        <span class="section-index">CONFIRM ISOLATED INCIDENT</span>
+        <h2 id="dialog-title">确认创建故障现场？</h2>
+        <p>系统会启动一个资源受限的 Java 子进程。CPU 场景仍会占用本机计算资源，但会按时结束且可以随时停止。</p>
+        <dl>
+            <div><dt>模式</dt><dd id="confirm-scenario">随机盲测</dd></div>
+            <div><dt>时长</dt><dd id="confirm-duration">40 秒</dd></div>
+            <div><dt>最大堆</dt><dd id="confirm-heap">64 MB</dd></div>
+        </dl>
+        <div class="dialog-actions">
+            <button class="button button-secondary" value="cancel">取消</button>
+            <button id="confirm-start" class="button button-primary" value="confirm">确认并启动</button>
+        </div>
+    </form>
+</dialog>
+
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+<script src="/app.js" defer></script>
+</body>
+</html>

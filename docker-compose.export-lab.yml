@@ -1,0 +1,32 @@
+services:
+  export-lab-mysql:
+    image: mysql:8.4
+    container_name: export-lab-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: export_lab
+      MYSQL_USER: export_lab
+      MYSQL_PASSWORD: export_lab_2026
+      MYSQL_ROOT_PASSWORD: root_2026
+      TZ: Asia/Shanghai
+    ports:
+      - "13307:3306"
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --performance-schema=ON
+    volumes:
+      - export-lab-mysql-data:/var/lib/mysql
+    # Bound filesort and other MySQL scratch files. Without a dedicated mount,
+    # /tmp is part of Docker's VHDX and repeated external sorts can inflate it.
+    # The 512 MB limit is shared by all concurrent MySQL sessions.
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uexport_lab", "-pexport_lab_2026"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  export-lab-mysql-data:

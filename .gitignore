@@ -1,0 +1,46 @@
+# Maven
+**/target/
+
+# IntelliJ IDEA
+.idea/
+*.iml
+
+# VS Code
+.vscode/
+
+# Java运行文件
+*.class
+*.jar
+*.war
+
+# 日志和Dump
+*.log
+*.log.*
+*.hprof
+*.threads
+*.index
+*.gz
+hs_err_pid*
+
+# 实验运行目录
+**/runtime/
+**/export-output/
+**/dump/
+**/evidence/
+**/gc/
+
+# Excel临时文件和导出结果
+*.xlsx
+*.xls
+*.csv
+*.tmp
+
+# 环境变量和密钥
+.env
+.env.*
+*.key
+*.pem
+
+# Windows
+Thumbs.db
+Desktop.ini
